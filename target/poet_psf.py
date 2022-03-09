@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-from skimage.transform import downscale_local_mean, resize
+from skimage.transform import resize
 
 from scipy.io import loadmat
 from scipy.signal import fftconvolve
@@ -122,8 +122,8 @@ def gen_unconv_image(pars,starmodel_flux,xcoo,ycoo):
 
     pixels=np.zeros((xmax,ymax))
     
-    i=xcoo*pars.noversample
-    j=ycoo*pars.noversample
+    i = ( xcoo + (pars.xout - pars.ccd_dim[0])/2 ) * pars.noversample
+    j = ( ycoo + (pars.yout - pars.ccd_dim[1])/2 ) * pars.noversample
     
     pixels=addflux2pix(i,j,pixels,starmodel_flux)
     
@@ -144,58 +144,52 @@ def readkernels(inp_target):
             psf - array of PSFs.
     """
     
-    # detector_pixscale=18 #detector pixel size (microns)  ***This should be a model parameter***
-    detector_pixscale = 13 # microns/pxl (source: JF)
-
-    psf=[]
+    psf = []
     for name in psf_names:
         if psf_names[0][-3:] == 'mat':
             mat_dict=loadmat(psf_dir+psf_names[0]) #read in PSF from Matlab file
             
             psf_native=mat_dict['psf']
             dx_scale=mat_dict['dx'] #scale in micron/pixel of the PSF
-            x_scale=int(psf_native.shape[0]*dx_scale/detector_pixscale*pars.noversample) #This gives the PSF size in pixels 
-            y_scale=int(psf_native.shape[1]*dx_scale/detector_pixscale*pars.noversample) #This gives the PSF size in pixels 
+            x_scale=int(psf_native.shape[0]*dx_scale/inp_target.detector_pixscale*pars.noversample) #This gives the PSF size in pixels 
+            y_scale=int(psf_native.shape[1]*dx_scale/inp_target.detector_pixscale*pars.noversample) #This gives the PSF size in pixels 
             #We now resize the PSF from psf.shape to x_scale,yscale
             psf_resize=resize(psf_native,(x_scale,y_scale))
             psf.append(psf_resize)
             
-            #plt.imshow(psf_resize,norm=LogNorm())
-            #plt.show()
         else:
             hdr, psf_native = [], []
             with open(psf_dir+psf_names[0]) as f:
                 for cnt,line in enumerate(f):
                     if cnt < 18:
                         hdr.append( line.strip() )
-                        if hdr[-1].startswith('Data spacing'):
+                        if hdr[-1].startswith('Data area'):
                             _l = hdr[-1].split()
-                            dx_scale = float(_l[3])
+                            data_area = float(_l[3])
+                        if hdr[-1].startswith('Pupil grid size'):
+                            _l = hdr[-1].split()
+                            pupil_grid_size = float(_l[3])
+                        if hdr[-1].startswith('Image grid size'):
+                            _l = hdr[-1].split()
+                            img_grid_size = float(_l[3])
                     else:
+                        psf_pixscale = data_area / img_grid_size
                         psf_native.append( line.strip().split() )
             psf_native = np.array(psf_native,dtype=float)
 
-            # dx_scale = 4.
-            # detector_pixscale = dx_scale
-            # dx_scale = 13.
-            # dx_scale = 13.
-            dx_scale = 1.
-            detector_pixscale = 4.
-            x_scale=int(psf_native.shape[0]*dx_scale/detector_pixscale*inp_target.noversample) #This gives the PSF size in pixels 
-            y_scale=int(psf_native.shape[1]*dx_scale/detector_pixscale*inp_target.noversample) #This gives the PSF size in pixels 
-            # print(x_scale,y_scale)
-            # print(psf_native.shape)
-            # print(asdfs)
+            x_scale = int(psf_native.shape[0] \
+                            * (psf_pixscale / inp_target.detector_pixscale) \
+                            * inp_target.noversample)
+            y_scale = int(psf_native.shape[1] \
+                            * (psf_pixscale / inp_target.detector_pixscale) \
+                            * inp_target.noversample)
+            psf_resize = resize(psf_native,(x_scale,y_scale))
 
-            # x_scale=int(psf_native.shape[0]/2*inp_target.noversample) #This gives the PSF size in pixels 
-            # y_scale=int(psf_native.shape[1]/2*inp_target.noversample) #This gives the PSF size in pixels 
+            # Normalize
+            psf_resize /= np.sum(psf_resize)
 
-            #We now resize the PSF from psf.shape to x_scale,yscale
-            psf_resize=resize(psf_native,(x_scale,y_scale))
             psf.append(psf_resize)
         
     return psf
 
-
-# def 
 

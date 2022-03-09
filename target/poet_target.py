@@ -18,10 +18,10 @@ class Target(object):
                     srch_Gmax=14., # Max Gaia G magnitude for Gaia query
                     srch_nmax=1000, # Max number of Gaia sources to return
                     srch_radmax=None, # Max search radius for Gaia query [deg]
-                    fov=1.0, # Full-width FoV [deg]
+                    fov=1.0, # Full-width FoV [deg] used for converting ra,dec -> x_pxl, y_pxl
                     fov_type='square', # FoV shape
                     fov_pa=0., # FoV position angle [deg]
-                    ccd_dim=[1024,1024], # [pxl,pxl]
+                    ccd_dim=[1024,1024], # [pxl,pxl] used for plotting (including converting ra,dec -> x_pxl,y_pxl)
                     gs_criteria={'Gmag':[-10, 12.]}, # Criteria for guide star
                     pl_model={},
                     save=False,quiet=False,
@@ -86,7 +86,9 @@ class Target(object):
             self.xout = 1024 #x-axis
             self.yout = 1024 #y-axis
             self.noversample = 2
-            self.aperture = 5 # radius [pxl] used for calculating integrated flux
+            self.ccd_aperture = 5 # radius [pxl] for integrating flux on CCD to generate LC
+            self.detector_aperture = 0.15 # instrument aperture radius [m] used for ETC photon count
+            self.detector_pixscale = 13. # pixel size [microns]
 
         if self.save:
             self._save()
@@ -183,14 +185,18 @@ class Target(object):
             'CUNIT1': 'deg', 
             'CDELT1': self.fov/self.ccd_dim[0], 
             'CRPIX1': int(self.ccd_dim[0]/2), 
+            # 'CRPIX1': int(self.xout/2), 
             'CRVAL1': self.gaia['ra'][0], 
             'NAXIS1': self.ccd_dim[0],
+            'NAXIS1': self.xout,
             'CTYPE2': 'DEC--TAN', 
             'CUNIT2': 'deg', 
             'CDELT2': self.fov/self.ccd_dim[1], 
             'CRPIX2': int(self.ccd_dim[1]/2), 
+            # 'CRPIX2': int(self.yout/2), 
             'CRVAL2': self.gaia['dec'][0], 
             'NAXIS2': self.ccd_dim[1],
+            # 'NAXIS2': self.yout,
             'CROTA2': self.fov_pa,
         }
         wcs = WCS(wcs_input_dict)
@@ -331,8 +337,8 @@ class Target(object):
         ax.set_xlabel(r'x [pxl]',fontsize=16)
         ax.set_ylabel(r'y [pxl]',fontsize=16)
 
-        xlim = int(self.ccd_dim[0]/2) + self.ccd_dim[0] * 0.7 * np.array([-1.0,1.0])
-        ylim = int(self.ccd_dim[1]/2) + self.ccd_dim[1] * 0.7 * np.array([-1.0,1.0])
+        xlim = int(self.ccd_dim[0]/2) + self.xout * 0.7 * np.array([-1.0,1.0])
+        ylim = int(self.ccd_dim[1]/2) + self.yout * 0.7 * np.array([-1.0,1.0])
 
         if add_scene_sim:
             from matplotlib.colors import LogNorm
@@ -340,15 +346,15 @@ class Target(object):
             if ('scene' in self.gaia.keys()) == False:
                 self.scene_sim()
 
-            cmap = plt.get_cmap('cividis')
-            extent = np.array([int(self.ccd_dim[0]/2) - 256, 
-                                    int(self.ccd_dim[0]/2) + 256 - 256,
+            extent = np.array([ int(self.ccd_dim[0]/2) - self.xout/2,
+                                int(self.ccd_dim[0]/2) + self.xout/2,
+                                int(self.ccd_dim[1]/2) - self.yout/2 - 2,
+                                int(self.ccd_dim[1]/2) + self.yout/2 - 2]) # I don't know where the -2 comes from that's necessary here...
 
-                                 int(self.ccd_dim[1]/2) - 256, 
-                                    int(self.ccd_dim[1]/2) + 256 - 256])
+            cmap = plt.get_cmap('cividis')
             _f = self.gaia['scene']-np.min(self.gaia['scene'])+1
-            ax.imshow(_f,
-                    norm=LogNorm(),
+            ax.imshow(_f,norm=LogNorm(),
+                    extent=extent,
                     interpolation=None,cmap=cmap,zorder=-100)
 
         if plot_grid:
@@ -498,7 +504,7 @@ class Target(object):
 
 
     #####
-    def gen_scene(self,psf,starmodel_flux,quiet=False):
+    def gen_scene(self,psf,starmodel_flux,quiet=False,return_err=True):
         from target import poet_etc, poet_psf
         from scipy.signal import fftconvolve
 
@@ -564,7 +570,14 @@ class Target(object):
         if quiet == False:
             pbar.close()
 
-        return pixels_final
+        if return_err:
+            # Calculate flux error
+            rnoise_ADU = self.readnoise / self.gain
+            pixels_err = np.sqrt( np.abs(pixels_final) ) + rnoise_ADU * np.sqrt(self.nstack)
+
+            return pixels_final, pixels_err
+        else:
+            return pixels_final
     ##########
 
 
@@ -574,96 +587,40 @@ class Target(object):
         from target import poet_etc, poet_psf
         from scipy.io import loadmat
 
+        import importlib
+        importlib.reload(poet_psf)
+
         # Generate simulated CCD image based on Gaia sources
         if hasattr(self,'gaia') == False:
             self.search_gaia()
 
-        # Load PSF kernel
-        if reload_kernel | (hasattr(self, 'psf') == False):
-            psf = poet_psf.readkernels(self)
-            psf[0] = psf[0] / np.sum(psf[0])
-            self.psf = psf
-        else:
-            psf = self.psf
-
-        # Calculate source flux using ETC
+        # Calculate flux using ETC for each Gaia source
         nsrc = len(self.gaia['ra']) # Number of sources
         starmodel_flux = np.zeros(nsrc)
         BPwv = np.arange(733,800,0.25).tolist()
         BPwv = np.asfarray(BPwv, float)
         bandpass = [0.2] * BPwv
-        aperture = 0.15
         zero_point = 25.6884
         for n in range(nsrc):
             _tmp = poet_etc.Photon_Count(temp = 9500, metallicity = 'p00', logG = 'g45', 
                                            Wmin = 500, Wmax = 1000,
                                            bandpass = bandpass,bandpassWave =BPwv, 
-                                           aperture = aperture,
+                                           aperture = self.detector_aperture, # aperture radius [m]
                                            GAIA_mag = self.gaia['Gmag'][n],
                                            zero_point = zero_point)
             # Get total counts for single exposure
             starmodel_flux[n] = np.sum(_tmp) * self.exptime / 6.
 
-        pixels_final = self.gen_scene(psf,starmodel_flux,quiet=quiet)
+        # Load PSF kernel
+        if reload_kernel | (hasattr(self, 'psf') == False):
+            psf = poet_psf.readkernels(self)
+            self.psf = psf
+        else:
+            psf = self.psf
 
-        # # Generate scene
-        # if quiet == False:
-        #     print('Generating scene...')
-        #     pbar = tqdm(total=self.nstack*self.iframe)
-        # pixels_final = np.zeros((self.xout,self.yout))
-        # for istack in range(self.nstack):
-        #     for icount in range(self.iframe):
-        #         # adding pointing jitter
-        #         xjit = np.random.normal() * self.jitter_dis
-        #         yjit = np.random.normal() * self.jitter_spa
-        #         xpad = self.xpad * self.noversample
-        #         ypad = self.ypad * self.noversample
-
-        #         # Add each Gaia source
-        #         for isource in range(nsrc):
-        #             xcoo = self.gaia['x'][isource] + xjit + xpad/2
-        #             ycoo = self.gaia['y'][isource] + yjit + ypad/2
-        #             if (icount == 0) & (isource == 0):
-        #                 pixels = poet_psf.gen_unconv_image(self,starmodel_flux[isource],xcoo,ycoo)
-        #             else:
-        #                 pixels1 = poet_psf.gen_unconv_image(self,starmodel_flux[isource],xcoo,ycoo)
-        #                 pixels += pixels1
-        #         if quiet == False:
-        #             pbar.update()
-        #     pixels = pixels / self.iframe
-
-        #     # Create Convolved Image
-        #     pixels_conv = fftconvolve(pixels, psf[0], mode='same')
-
-        #     # remove padding
-        #     pshape = pixels_conv.shape
-        #     xpad = self.xpad * self.noversample
-        #     ypad = self.ypad * self.noversample
-        #     pixels_conv_ras = pixels_conv[ypad:pshape[0]-ypad,xpad:pshape[1]-xpad]
-
-        #     # Scale to native resolution (remove oversampling.)
-        #     pixels_conv_ras_nav = downscale_local_mean(pixels_conv_ras,(self.noversample,self.noversample))
-
-        #     # add Noise.
-
-        #     #Shot-noise
-        #     pixels_conv_ras_nav_noise = pixels_conv_ras_nav + np.sqrt(np.abs(pixels_conv_ras_nav))*\
-        #                                                   np.random.normal(size=(pixels_conv_ras_nav.shape[0],\
-        #                                                   pixels_conv_ras_nav.shape[1]))
-        #     #Read-noise
-        #     rnoise_ADU = self.readnoise / self.gain
-        #     pixels_conv_ras_nav_noise += rnoise_ADU * np.random.normal(size=(pixels_conv_ras_nav_noise.shape[0],\
-        #                                                            pixels_conv_ras_nav_noise.shape[1]))
-
-        #     #Quantize image
-        #     pixels_conv_ras_nav_noise_int = np.floor(pixels_conv_ras_nav_noise)
-
-        #     # Add for each frame in stack
-        #     pixels_final += pixels_conv_ras_nav_noise_int
-
-        # Calculate flux error
-        rnoise_ADU = self.readnoise / self.gain
-        pixels_err = np.sqrt( np.abs(pixels_final) ) + rnoise_ADU * np.sqrt(self.nstack)
+        # Get CCD flux array
+        pixels_final, pixels_err = self.gen_scene(psf,starmodel_flux, \
+                                        quiet=quiet,return_err=True)
 
         if update_gaia:
             self.gaia['scene'] = pixels_final.T
@@ -679,6 +636,7 @@ class Target(object):
 
     #####
     def lc_sim(self,quiet=False,return_lc=False):
+        from photutils import CircularAperture, aperture_photometry
 
         nsrc = len(self.gaia['ra'])
 
@@ -696,17 +654,18 @@ class Target(object):
                 # Generate simulated image
                 obs, err = self.scene_sim(return_scene=True,quiet=True,update_gaia=False)
 
-                if n == 0:
-                    xgrid, ygrid = np.meshgrid( np.arange(obs.shape[0]), 
-                                                np.arange(obs.shape[1]) )
-
-                # for i in range(nsrc):
                 for i in range(1):
-                    ti = np.sqrt( (xgrid - self.gaia['x'][i])**2 \
-                                        + (ygrid - self.gaia['y'][i])**2 ) \
-                                    < self.aperture
-                    fl[n,i] += np.sum( obs[ti] )
-                    fl_err[n,i] += np.sum( err[ti] )
+                    x0 = self.gaia['x'][i] + (self.xout - self.ccd_dim[0])/2 - 0.5
+                    y0 = self.gaia['y'][i] + (self.yout - self.ccd_dim[1])/2 + 0.5
+                    aperture = CircularAperture((x0, y0), r=self.ccd_aperture)
+
+                    _ap_phot = aperture_photometry(np.abs(obs), 
+                                    aperture, method='exact')
+                    fl[n,i] = np.sum( _ap_phot['aperture_sum'] )
+
+                    _ap_phot = aperture_photometry(np.abs(err), 
+                                    aperture, method='exact')
+                    fl_err[n,i] = np.sum( _ap_phot['aperture_sum'] )
                 if quiet == False:
                     pbar.update()
             if quiet == False:
@@ -773,128 +732,5 @@ class Target(object):
     ##########
 
 
-    #####
-    # def scene_sim(self):
-    #     from target import poet_etc, poet_psf
-    #     from scipy.io import loadmat
-    #     from scipy.signal import fftconvolve
-
-    #     # Generate simulated CCD image based on Gaia sources
-    #     if hasattr(self,'gaia') == False:
-    #         self.search_gaia()
-
-    #     psf_dir = '/Users/james/poet/Kernels/'
-    #     # psf_names = ['Pandora_nir_20210602_trefoil.mat']
-    #     psf_names = ['POET_PSF_CenterFoV_VNIR.txt']
-
-    #     pars = poet_psf.ModelPars
-
-    #     psf = poet_psf.readkernels(self)
-    #     psf[0] = psf[0] / np.sum(psf[0])
-
-    #     psf_sigma=1.1 #starting value of PSF width
-    #     siggrow=0.0 #how much to grow the PSF (pixels)
-    #     signorm=0.25 #how much variation to add to PSF width
-    #     nstack=30
-
-    #     dsig=[]
-    #     pscat=[]
-            
-    #     phot_array=[]
-    #     phot_err_array=[]
-    #     time=[]
-    #     t=0
-
-    #     npsf=len(psf)
-    #     from skimage.transform import downscale_local_mean, resize
-    #     for i in range(npsf):
-    #         #We now resize the PSF from psf.shape to x_scale,yscale
-    #         x_scale=psf[i].shape[0]*pars.noversample
-    #         y_scale=psf[i].shape[1]*pars.noversample
-    #         psf[i]=resize(psf[i],(x_scale,y_scale))
-
-    #     iexp = 0
-
-    #     # Calculate flux using ETC
-    #     c = 2.998e8 #speed of light (m/s)
-    #     h = 6.626e-34 #Planck m^2 kg/s
-    #     Pi= np.pi*1.0 #define Pi
-    #     Rsun = 695700000.0  # Radius of Sun (m)
-    #     zero_point = 25.6884
-    #     tput = 0.18 
-    #     aperture = 0.15
-    #     aperture2 = 2.4
-    #     gain = 6.1 #Photons needed for a single electron event 
-    #     grid_dir="/Users/james/poet-main/ck04models/" #base directory for ATLAS models
-
-    #     nsrc = len(self.gaia['ra'])
-    #     starmodel_flux = np.zeros(nsrc)
-    #     BPwv = np.arange(733,800,0.25).tolist()
-    #     BPwv = np.asfarray(BPwv, float)
-    #     bandpass = [0.2]*BPwv
-    #     for n in range(nsrc):
-    #         _tmp = poet_etc.Photon_Count(temp = 9500, metallicity = 'p00', logG = 'g45', Wmin = 500, Wmax = 1000,
-    #                                        bandpass = bandpass,bandpassWave =BPwv, aperture = aperture,
-    #                                        GAIA_mag = self.gaia['Gmag'][n],zero_point = zero_point)
-    #         starmodel_flux[n] = np.sum(_tmp) * 1.e-4 # Need to correct
-
-    #     pixels_final=np.zeros((pars.xout,pars.yout))
-    #     print('Generating scene...')
-    #     pbar = tqdm(total=nstack*pars.iframe)
-    #     for istack in range(nstack):
-    #         for icount in range(pars.iframe):
-    #             #adding pointing jitter
-    #             xjit=np.random.normal()*pars.jitter_dis
-    #             yjit=np.random.normal()*pars.jitter_spa
-    #             xpad=pars.xpad*pars.noversample
-    #             ypad=pars.ypad*pars.noversample
-    #             # xcoo=pars.xout/2+xjit+xpad/2
-    #             # ycoo=pars.yout/2+yjit+ypad/2
-
-    #             for isource in range(nsrc):
-    #                 xcoo = self.gaia['x'][isource] + xjit + xpad/2
-    #                 ycoo = self.gaia['y'][isource] + yjit + ypad/2
-    #                 if (icount==0) & (isource == 0):
-    #                     pixels=poet_psf.gen_unconv_image(pars,starmodel_flux[isource],xcoo,ycoo)
-    #                 else:
-    #                     pixels1=poet_psf.gen_unconv_image(pars,starmodel_flux[isource],xcoo,ycoo)
-    #                     pixels+=pixels1
-    #             pbar.update()
-    #         pixels=pixels/pars.iframe
-
-    #         #Create Convolved Image
-    #         pixels_conv=fftconvolve(pixels, psf[0], mode='same')
-
-    #         #remove padding
-    #         pshape=pixels_conv.shape
-    #         xpad=pars.xpad*pars.noversample
-    #         ypad=pars.ypad*pars.noversample
-    #         pixels_conv_ras=pixels_conv[ypad:pshape[0]-ypad,xpad:pshape[1]-xpad]
-    #         #print(np.sum(pixels_conv_tf_ras))
-
-    #         #Scale to native resolution (remove oversampling.)
-    #         pixels_conv_ras_nav=downscale_local_mean(pixels_conv_ras,(pars.noversample,pars.noversample))
-
-    #         #add Noise.
-    #         #Shot-noise
-    #         pixels_conv_ras_nav_noise=pixels_conv_ras_nav+np.sqrt(np.abs(pixels_conv_ras_nav))*\
-    #                                                       np.random.normal(size=(pixels_conv_ras_nav.shape[0],\
-    #                                                       pixels_conv_ras_nav.shape[1]))
-    #         #Read-noise
-    #         rnoise_ADU=pars.readnoise/pars.gain
-    #         pixels_conv_ras_nav_noise+=rnoise_ADU*np.random.normal(size=(pixels_conv_ras_nav_noise.shape[0],\
-    #                                                                pixels_conv_ras_nav_noise.shape[1]))
-
-    #         #Quantize image
-    #         pixels_conv_ras_nav_noise_int=np.floor(pixels_conv_ras_nav_noise)
-
-    #         pixels_final+=pixels_conv_ras_nav_noise_int
-    #     # pbar.close()
-        
-    #     self.gaia['scene'] = pixels_final.T
-
-    #     if self.save:
-    #         self._save()
-    ##########
 
 
