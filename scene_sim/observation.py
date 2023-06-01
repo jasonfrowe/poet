@@ -619,21 +619,6 @@ class Observation(object):
 
             ax.scatter(self.gaia['Gmag'][self.gaia['gs_i']],self.gaia['gs_SN_pix_max'])
 
-            # Plot S/N of solar-type star (TBD)
-            # if (os.path.exists('/Users/james/poet/target/G2V_SN_Gmag_2Hz.dat') == False):
-            #     # Calculate S/N
-
-            #     # Generate scene simulation using guide star exposure criteria
-            #     _nstack, _exptime, _quiet = self.nstack, self.exptime, self.quiet # Store previous nstack and exptime
-            #     _x, _y, _Gmag
-
-            #     _Gmag = np.linspace(5,13,10)
-            #     for k in range(len(_Gmag)):
-            #         self.nstack, self.exptime, self.quiet = 1, self.gs_criteria['exptime'], True
-            #         SN_pix = self.scene_sim(return_SN_only=True) # Get guide star S/N per pixel
-            #         # Restore nstack, exptime settings
-            #         self.nstack, self.exptime, self.quiet = _nstack, _exptime, _quiet
-
             ax.set_xlabel('Gaia G [mag]',fontsize=16)
             ax.set_ylabel('Max. S/N per pixel',fontsize=16)
 

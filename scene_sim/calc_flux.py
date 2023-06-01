@@ -39,7 +39,7 @@ def getStarData(temperature, metallicity, logg,
     # Default to ATLAS9 model
     #     If Teff < 3500 K (i.e., min Teff in ATLAS9 grid, switch to BTSettl grid)
     if ( (model_grid == 'BTSettl') | (temperature < 3500) ):
-        grid_dir = '/Users/james/poet/stellar_models/BTSettl_CIFIST/'
+        grid_dir = 'stellar_models/BTSettl_CIFIST/'
 
         # Scan directory to inventory model grid
         # Assumes all files starting with 'lte' are model files
@@ -85,7 +85,7 @@ def getStarData(temperature, metallicity, logg,
         flux *= 0.01 # [erg/s/cm2/angstrom] -> [W/m2/nm]
 
     elif model_grid == 'ATLAS9':
-        grid_dir = '/Users/james/poet/stellar_models/ATLAS9/ck04models/'
+        grid_dir = 'stellar_models/ATLAS9/ck04models/'
         teff_grid = np.array([3500, 3750, 4000, 4250, 4500, 4750, 5000, 5250, 5500, 5750, 
                               6000, 6250, 6500, 6750, 7000, 7250, 7500, 7750, 8000, 8250, 
                               8500, 8750, 9000, 9250, 9500, 9750, 10000, 10250, 10500, 10750, 
@@ -161,7 +161,7 @@ def Photon_Count(temp=5780., metallicity=0.0, logg=4.44,
     fl *= ( ( radius * const_Rsun() ) / ( dpc * const_pc() ) )**2
 
     # Calculate Gaia bandpass fluxes
-    tr_fcn = np.loadtxt('/Users/james/poet/stellar_models/transmission_functions/GaiaDR2_Passbands.dat')
+    tr_fcn = np.loadtxt('instrument_data/transmission_functions/GaiaDR2_Passbands.dat')
     gaia_flux = []
     for j in [1,3,5]: # Select columns listing transmission values, not the errors
         ti = np.where(tr_fcn[:,j] < 99)[0]
